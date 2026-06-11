@@ -1,0 +1,142 @@
+{
+  "cameras": [
+    {
+      "id": "cam1",
+      "position": "entrance",
+      "coverage_length": 150.0,
+      "video_filename": "TV62-K203+270_11EA9DE0_1657848462_1.mp4",
+      "calibration_points": [[0, 855], [1478, 1076], [1618, 254], [1697, 277]],
+      "detection_region": [[10, 868], [1161, 428], [1652, 498], [1522, 1073]],
+      "lane_definitions": [
+        {
+          "name": "lane1",
+          "polygon": [[3, 847], [1479, 302], [1565, 340], [692, 1075]]
+        },
+        {
+          "name": "lane2",
+          "polygon": [[685, 1078], [1569, 343], [1674, 370], [1496, 1075]]
+        }
+      ]
+    },
+    {
+      "id": "cam2",
+      "position": "middle1",
+      "coverage_length": 105.0,
+      "video_filename": "TV71-K204+215_11AAC078_1657848568_1-converted.mp4",
+      "calibration_points": [[4, 868], [1585, 1075], [1679, 100], [1806, 145]],
+      "detection_region": [[4, 868], [1585, 1075], [1679, 100], [1806, 145]],
+      "lane_definitions": [
+        {
+          "name": "lane1",
+          "polygon": [[2, 867], [1505, 164], [1622, 203], [692, 1075]]
+        },
+        {
+          "name": "lane2",
+          "polygon": [[685, 1074], [1646, 182], [1767, 198], [1586, 1066]]
+        }
+      ]
+    },
+    {
+      "id": "cam3",
+      "position": "middle2", 
+      "coverage_length": 105.0,
+      "video_filename": "TV73-K204+425_11AFA1D0_1657848624_1.mp4",
+      "calibration_points": [[5, 462], [1367, 1078], [1635, 41], [1774, 102]],
+      "detection_region": [[0, 467], [1065, 163], [1656, 377], [1434, 1070]],
+      "lane_definitions": [
+        {
+          "name": "lane1",
+          "polygon": [[7, 452], [1410, 85], [1518, 159], [162, 1067]]
+        },
+        {
+          "name": "lane2",
+          "polygon": [[183, 1072], [1514, 157], [1691, 207], [1374, 1069]]
+        }
+      ]
+    },
+    {
+      "id": "cam4",
+      "position": "middle3", 
+      "coverage_length": 105.0,
+      "video_filename": "TV74-K204+530_11AFA798_1657848650_1.mp4",
+      "calibration_points": [[12, 719], [1409, 1072], [1571, 93], [1683, 142]],
+      "detection_region": [[5, 716], [1050, 281], [1567, 414], [1407, 1074]],
+      "lane_definitions": [
+        {
+          "name": "lane1",
+          "polygon": [[0, 704], [1375, 149], [1474, 200], [479, 1067]]
+        },
+        {
+          "name": "lane2",
+          "polygon": [[473, 1076], [1553, 150], [1657, 170], [1421, 1064]]
+        }
+      ]
+    },
+    {
+      "id": "cam5",
+      "position": "middle4",
+      "coverage_length": 105.0,
+      "video_filename": "TV78-K204+950_11AF9078_1657848722_1-converted.mp4",
+      "calibration_points": [[3, 719], [1564, 1067], [1774, 108], [1905, 157]],
+      "detection_region": [[7, 705], [1562, 1078], [1786, 343], [1324, 229]],
+      "lane_definitions": [
+        {
+          "name": "lane1",
+          "polygon": [[6, 699], [1531, 175], [1649, 232], [552, 1062]]
+        },
+        {
+          "name": "lane2",
+          "polygon": [[539, 1074], [1713, 196], [1837, 234], [1561, 1078]]
+        }
+      ]
+    },
+    {
+      "id": "cam6",
+      "position": "exit",
+      "coverage_length": 105.0,
+      "video_filename": "TV79-K205+055_11AF7390_1657848766_1.mp4",
+      "calibration_points": [[15, 694], [1563, 1070], [1713, 73], [1865, 120]],
+      "detection_region": [[0, 702], [1259, 223], [1792, 355], [1564, 1076]],
+      "lane_definitions": [
+        {
+          "name": "lane1",
+          "polygon": [[18, 699], [1529, 133], [1646, 189], [557, 1077]]
+        },
+        {
+          "name": "lane2",
+          "polygon": [[562, 1069], [1704, 146], [1833, 174], [1570, 1059]]
+        }
+      ]
+    }
+  ],
+  
+  "blind_zones": [
+    {
+      "camera1": "cam1",
+      "camera2": "cam2",
+      "length": 50.0
+    },
+    {
+      "camera1": "cam2",
+      "camera2": "cam3",
+      "length": 50.0
+    },
+    {
+      "camera1": "cam3",
+      "camera2": "cam4",
+      "length": 270.0
+    },
+    {
+      "camera1": "cam4",
+      "camera2": "cam5",
+      "length": 40.0
+    },
+    {
+      "camera1": "cam5",
+      "camera2": "cam6",
+      "length": 50.0
+    }
+  ],
+  "tunnel_width": 7.0,
+  "lane_width": 3.5
+}
