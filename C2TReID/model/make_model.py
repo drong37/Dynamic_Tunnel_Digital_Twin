@@ -3,7 +3,7 @@ import torch.nn as nn
 from .backbones.resnet import ResNet, Bottleneck
 import copy
 from .backbones.vit_pytorch import vit_base_patch16_224_TransReID, vit_small_patch16_224_TransReID, deit_small_patch16_224_TransReID
-from C2T-ReID.loss.metric_learning import Arcface, Cosface, AMSoftmax, CircleLoss
+from C2TReID.loss.metric_learning import Arcface, Cosface, AMSoftmax, CircleLoss
 
 def shuffle_unit(features, shift, group, begin=1):
 

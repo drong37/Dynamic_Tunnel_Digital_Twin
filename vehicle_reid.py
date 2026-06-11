@@ -15,7 +15,7 @@ import shutil
 import argparse
 from collections import defaultdict, deque
 from typing import Dict, List, Tuple, Optional, Union
-from TransReID.utils.reranking import re_ranking
+from C2TReID.utils.reranking import re_ranking
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("EnhancedVehicleReID")
