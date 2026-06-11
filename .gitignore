@@ -206,22 +206,7 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Deep learning datasets and generated data
-/data/
-/dataset/
-/datasets/
-/raw_data/
-/processed_data/
-/external_data/
-/annotations/
-
 # Model weights, checkpoints, and exports
-/models/
-/checkpoints/
-/checkpoint/
-/weights/
-/pretrained/
-/pretrained_models/
 *.pt
 *.pth
 *.ckpt
