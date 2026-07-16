@@ -11,6 +11,7 @@ import traceback
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, Optional, List, Any
+from concurrent.futures import ThreadPoolExecutor
 
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
@@ -23,6 +24,7 @@ from tunnel_map import TunnelMap
 from vehicle_reid import VehicleReID
 from vehicle_id_corrector import VehicleIDCorrector
 from vehicle_prediction_manager import VehiclePredictionManager, VehicleState, MovementDirection
+from tunnel_fire_smoke_detection import TunnelFireSmokeDetector
 
 
 @dataclass
@@ -61,6 +63,75 @@ class VehicleBufferEntry:
     last_seen: float = 0.0
     processed: bool = False
 
+def fuse_buffer_features(reid_system: VehicleReID, buffer_entry: VehicleBufferEntry) -> Optional[np.ndarray]:
+    """Extract and quality-weight fuse features from buffered vehicle patches."""
+    fused, _quality = fuse_buffer_features_and_quality(reid_system, buffer_entry)
+    return fused
+
+def _as_valid_quality(quality: Any) -> Optional[float]:
+    """Coerce quality to the normalized range expected by VehicleReID."""
+    try:
+        score = float(quality)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(score) or score < 0.0 or score > 1.0:
+        return None
+    return score
+
+
+def fuse_buffer_features_and_quality(
+    reid_system: VehicleReID,
+    buffer_entry: VehicleBufferEntry
+) -> Tuple[Optional[np.ndarray], Optional[float]]:
+    """Extract and quality-weight fuse features from buffered vehicle patches."""
+    features = []
+    weights = []
+    valid_qualities = []
+
+    for patch, quality in zip(buffer_entry.patches, buffer_entry.quality_scores):
+        feature = reid_system.extract_features(patch)
+        if feature is None:
+            continue
+
+        feature = np.asarray(feature, dtype=np.float32)
+        if feature.size == 0 or not np.all(np.isfinite(feature)):
+            continue
+
+        quality = _as_valid_quality(quality)
+        if quality is None:
+            continue
+
+        norm = np.linalg.norm(feature)
+        if norm <= 0:
+            continue
+        features.append(feature / norm)
+        weights.append(max(quality, 1e-6))
+        valid_qualities.append(quality)
+
+    if not features:
+        return None, None
+
+    weights_array = np.asarray(weights, dtype=np.float32)
+    weights_sum = np.sum(weights_array)
+    if not np.isfinite(weights_sum) or weights_sum <= 0:
+        return None, None
+
+    weights_array = weights_array / weights_sum
+    fused = np.average(np.asarray(features, dtype=np.float32), axis=0, weights=weights_array)
+    norm = np.linalg.norm(fused)
+    if norm > 0:
+        fused = fused / norm
+    return fused.astype(np.float32), max(valid_qualities)
+
+
+def _best_finite_quality(quality_scores: List[float], default: float = 0.5) -> float:
+    """Return the best normalized quality score, or a conservative default."""
+    valid_scores = []
+    for quality in quality_scores:
+        score = _as_valid_quality(quality)
+        if score is not None:
+            valid_scores.append(score)
+    return max(valid_scores) if valid_scores else default
 
 class RTSPBufferedCapture:
 
@@ -114,7 +185,6 @@ class RTSPBufferedCapture:
                 self.is_connected = True
                 self.last_frame_time = time.time()
                 self.consecutive_failures = 0
-
                 if self.frame_queue.full():
                     try:
                         self.frame_queue.get_nowait()
@@ -171,7 +241,7 @@ class FrameSynchronizer:
         
         self.finished_cameras: set = set()
         self.stream_cameras: set = set()
-
+        
         print(f"帧同步器已初始化: {len(camera_ids)}个摄像头 (非阻塞实时模式)")
     
     def add_frame(self, camera_id: str, frame: Optional[np.ndarray], timestamp: float) -> bool:
@@ -330,14 +400,14 @@ class EnhancedVehicleIDManager:
         
         self.last_independent_correction_check = 0.0
         self.independent_correction_interval = 10.0
+        
+        self.prediction_manager = VehiclePredictionManager(tunnel_map)
 
         active_cfg = config.TRACKING_STRATEGY['active_tracking']
         self.active_mapping_window = float(active_cfg['mapping_recent_sec'])
         self.active_detection_recent_window = float(active_cfg['detection_recent_sec'])
         self.active_detection_stale_window = float(active_cfg['detection_stale_sec'])
         self.camera_active_window = float(active_cfg['camera_recent_sec'])
-        
-        self.prediction_manager = VehiclePredictionManager(tunnel_map)
         
         print("增强版车辆ID管理器已初始化，支持ID纠错和缓冲机制，使用统一的预测管理器")
     
@@ -496,6 +566,11 @@ class EnhancedVehicleIDManager:
             if best_patch is None:
                 print(f"无法从缓冲区提取有效图像块: {track_key}")
                 return None
+
+            fused_features, fused_quality = fuse_buffer_features_and_quality(self.reid_system, buffer_entry)
+            best_quality = fused_quality if fused_quality is not None else (
+                _best_finite_quality(buffer_entry.quality_scores)
+            )
             
             if track_key in self.vehicle_id_mapping:
                 existing_id = self.vehicle_id_mapping[track_key]
@@ -506,9 +581,16 @@ class EnhancedVehicleIDManager:
                     existing_id = None
                 
                 if existing_id is not None and not self.reid_system.update_gallery(
-                    existing_id, best_patch, camera_id=camera_id
+                    existing_id, best_patch, features=fused_features, camera_id=camera_id
                 ):
-                    reid_global_id = self.reid_system.get_global_id(best_patch, camera_id)
+                    if fused_features is not None:
+                        reid_global_id = self.reid_system.get_global_id_from_features(
+                            fused_features,
+                            quality_score=best_quality,
+                            camera_id=camera_id
+                        )
+                    else:
+                        reid_global_id = self.reid_system.get_global_id(best_patch, camera_id)
                     if reid_global_id is not None:
                         if self._is_global_id_blocked(camera_id, reid_global_id, current_time):
                             forced_id = self._force_new_global_id(best_patch, camera_id)
@@ -527,7 +609,14 @@ class EnhancedVehicleIDManager:
                     print(f"缓冲区特征更新成功: {track_key} -> ID {existing_id}")
                     return existing_id
                 else:
-                    reid_global_id = self.reid_system.get_global_id(best_patch, camera_id)
+                    if fused_features is not None:
+                        reid_global_id = self.reid_system.get_global_id_from_features(
+                            fused_features,
+                            quality_score=best_quality,
+                            camera_id=camera_id
+                        )
+                    else:
+                        reid_global_id = self.reid_system.get_global_id(best_patch, camera_id)
                     if reid_global_id is not None:
                         if self._is_global_id_blocked(camera_id, reid_global_id, current_time):
                             forced_id = self._force_new_global_id(best_patch, camera_id)
@@ -542,7 +631,14 @@ class EnhancedVehicleIDManager:
                     print(f"缓冲区ReID失败: {track_key}")
                     return None
             else:
-                reid_global_id = self.reid_system.get_global_id(best_patch, camera_id)
+                if fused_features is not None:
+                    reid_global_id = self.reid_system.get_global_id_from_features(
+                        fused_features,
+                        quality_score=best_quality,
+                        camera_id=camera_id
+                    )
+                else:
+                    reid_global_id = self.reid_system.get_global_id(best_patch, camera_id)
                 if reid_global_id is not None:
                     if self._is_global_id_blocked(camera_id, reid_global_id, current_time):
                         forced_id = self._force_new_global_id(best_patch, camera_id)
@@ -566,9 +662,18 @@ class EnhancedVehicleIDManager:
         if len(buffer_entry.patches) == 0:
             return None
         
-        best_index = np.argmax(buffer_entry.quality_scores)
-        best_patch = buffer_entry.patches[best_index]
-        best_quality = buffer_entry.quality_scores[best_index]
+        best_patch = None
+        best_quality = None
+        for patch, quality in zip(buffer_entry.patches, buffer_entry.quality_scores):
+            score = _as_valid_quality(quality)
+            if score is None:
+                continue
+            if best_quality is None or score > best_quality:
+                best_patch = patch
+                best_quality = score
+
+        if best_patch is None or best_quality is None:
+            return None
         
         print(f"选择最佳图像块: 质量分数={best_quality:.3f}, 总数={len(buffer_entry.patches)}")
         
@@ -988,7 +1093,6 @@ class EnhancedVehicleSystem:
         self.display_thread: Optional[threading.Thread] = None
         self.ws_push_thread: Optional[threading.Thread] = None
         self.incremental_push_thread: Optional[threading.Thread] = None
-        self.ws_push_flag = threading.Event()
         self.processing_times: Dict[str, List[float]] = defaultdict(list)
         self.processing_fps: Dict[str, float] = {}
         
@@ -1022,13 +1126,13 @@ class EnhancedVehicleSystem:
             camera_calibrations=self.calibrations
         )
         
-        model_path = os.path.join(config.MODEL_DIR, "deit_base_distilled_patch16_224-df68dfff.pth")
-        test_path = os.path.join(config.MODEL_DIR, "deit_C2T-ReID_vehicleID.pth")
-        config_path = os.path.join(config.BASE_DIR, "C2T-ReID/configs/VehicleID/deit_C2T-ReID_stride.yml")
+        pretrain_path = config.REID_PRETRAIN_PATH
+        test_path = config.REID_TEST_PATH
+        config_path = config.REID_CONFIG_PATH
         
         self.reid_system = VehicleReID(
-            model_path,
             config_path,
+            pretrain_path,
             test_path,
             matching_threshold=config.REID_MATCH_THRESHOLD,
             camera_topology=config.CAMERA_TOPOLOGY
@@ -1043,6 +1147,18 @@ class EnhancedVehicleSystem:
         self.video_capture = VideoCapture(config.CAMERA_CONFIG)
         self.output_manager = VideoOutputManager(self.output_width, self.output_height)
         self.view_composer = ViewComposer(self.output_width, self.output_height)
+
+        self.fire_detector: Optional[TunnelFireSmokeDetector] = None
+        if hasattr(config, 'FIRE_DETECTION_CONFIG') and config.FIRE_DETECTION_CONFIG.get('enabled', False):
+            try:
+                self.fire_detector = TunnelFireSmokeDetector(
+                    model_path=config.FIRE_DETECTION_CONFIG.get('model_path', 'models/yolo11n-fire-smoke-v2.pt'),
+                    confidence_threshold=config.FIRE_DETECTION_CONFIG.get('confidence_threshold', 0.5),
+                    fire_icon_path=config.FIRE_DETECTION_CONFIG.get('fire_icon_path', 'utils/flammable.png')
+                )
+                print("火灾检测器初始化完成")
+            except Exception as e:
+                print(f"火灾检测器初始化失败: {e}")
 
         self.frame_synchronizer: Optional[FrameSynchronizer] = None
     
@@ -1099,12 +1215,6 @@ class EnhancedVehicleSystem:
             )
             self.incremental_push_thread.start()
 
-            # self.ws_push_thread = threading.Thread(
-            #     target=self._ws_push_thread,
-            #     name="WebSocketPush",
-            #     daemon=True
-            # )
-            # self.ws_push_thread.start()
     
     def _capture_thread(self, camera_id: str, capture: cv2.VideoCapture, start_delay: float = 0.0):
         
@@ -1206,30 +1316,45 @@ class EnhancedVehicleSystem:
             time_point, frames = self.frame_synchronizer.get_frames_to_process()
             if time_point is None or not frames:
                 continue
-            
-            map_updates = []
-            
-            for camera_id, frame_data in frames.items():
-                if frame_data.frame is None:
-                    self.frame_synchronizer.add_processed_result(time_point, camera_id, None, [])
-                    continue
-                
-                processed_frame, tracked_vehicles = self._process_single_camera(
-                    camera_id, frame_data.frame, time_point
-                )
-                
-                global_ids, camera_map_updates = self.id_manager.update_vehicle_ids(
-                    camera_id, tracked_vehicles, time_point
-                )
-                map_updates.extend(camera_map_updates)
-                
-                self.frame_synchronizer.add_processed_result(
-                    time_point, camera_id, processed_frame, tracked_vehicles
-                )
-            
-            self._update_tunnel_map(map_updates)
-            
-            self._update_processing_statistics()
+
+            if config.BATCH_INFERENCE_ENABLED:
+                self._process_batch(frames, time_point)
+            else:
+                map_updates = []
+
+                for camera_id, frame_data in frames.items():
+                    if frame_data.frame is None:
+                        self.frame_synchronizer.add_processed_result(time_point, camera_id, None, [])
+                        continue
+
+                    processed_frame, tracked_vehicles = self._process_single_camera(
+                        camera_id, frame_data.frame, time_point
+                    )
+
+                    if self.fire_detector:
+                        try:
+                            fire_detections = self.fire_detector.detect_fire_smoke(
+                                frame_data.frame, camera_id
+                            )
+                            if fire_detections:
+                                processed_frame = self.fire_detector.draw_detections_on_frame(
+                                    processed_frame, fire_detections
+                                )
+                        except Exception as e:
+                            print(f"火灾检测失败 {camera_id}: {e}")
+
+                    global_ids, camera_map_updates = self.id_manager.update_vehicle_ids(
+                        camera_id, tracked_vehicles, time_point
+                    )
+                    map_updates.extend(camera_map_updates)
+
+                    self.frame_synchronizer.add_processed_result(
+                        time_point, camera_id, processed_frame, tracked_vehicles
+                    )
+
+                self._update_tunnel_map(map_updates)
+
+                self._update_processing_statistics()
     
     def _process_single_camera(self, camera_id: str, frame: np.ndarray, 
                              timestamp: float) -> Tuple[np.ndarray, List]:
@@ -1251,7 +1376,96 @@ class EnhancedVehicleSystem:
             self.processing_fps[camera_id] = 1.0 / avg_time if avg_time > 0 else 0
         
         return result_frame, tracked_vehicles
-    
+
+    def _process_batch(self, frames: Dict, time_point: float):
+        map_updates = []
+
+        camera_order = []
+        frames_batch = []
+
+        for camera_id in sorted(frames.keys()):
+            frame_data = frames[camera_id]
+            if frame_data.frame is None:
+                self.frame_synchronizer.add_processed_result(time_point, camera_id, None, [])
+            else:
+                camera_order.append(camera_id)
+                frames_batch.append(frame_data.frame)
+
+        if not frames_batch:
+            return
+
+        batch_start = time.time()
+        all_detections = self.detector.detect(frames_batch)
+        batch_time = time.time() - batch_start
+
+        fire_detections_by_camera: Dict[str, List] = {}
+        if self.fire_detector:
+            try:
+                fire_detections_by_camera = self.fire_detector.detect_fire_smoke_batch(
+                    frames_batch, camera_order
+                )
+            except Exception as e:
+                print(f"批量火灾检测失败: {e}")
+
+        def process_single_tracking(args):
+            _, camera_id, frame, detections = args
+            camera_start = time.time()
+
+            tracker = self.trackers[camera_id]
+            tracked_vehicles = tracker.update(frame, detections)
+            result_frame = tracker.draw_tracks(frame, tracked_vehicles, {})
+
+            if camera_id in fire_detections_by_camera and fire_detections_by_camera[camera_id]:
+                if self.fire_detector:
+                    result_frame = self.fire_detector.draw_detections_on_frame(
+                        result_frame, fire_detections_by_camera[camera_id]
+                    )
+
+            tracking_time = time.time() - camera_start
+
+            return {
+                'camera_id': camera_id,
+                'frame': result_frame,
+                'tracked_vehicles': tracked_vehicles,
+                'tracking_time': tracking_time
+            }
+
+        tracking_args = [
+            (idx, camera_order[idx], frames_batch[idx], all_detections[idx])
+            for idx in range(len(camera_order))
+        ]
+
+        with ThreadPoolExecutor(max_workers=len(camera_order)) as executor:
+            futures = [executor.submit(process_single_tracking, args) for args in tracking_args]
+            results = [f.result() for f in futures]
+
+        for result in results:
+            camera_id = result['camera_id']
+
+            per_camera_batch_time = batch_time / len(camera_order)
+            self._update_camera_statistics(camera_id, per_camera_batch_time + result['tracking_time'])
+
+            _, camera_map_updates = self.id_manager.update_vehicle_ids(
+                camera_id, result['tracked_vehicles'], time_point
+            )
+            map_updates.extend(camera_map_updates)
+
+            self.frame_synchronizer.add_processed_result(
+                time_point, camera_id, result['frame'], result['tracked_vehicles']
+            )
+
+        self._update_tunnel_map(map_updates)
+        self._update_processing_statistics()
+
+    def _update_camera_statistics(self, camera_id: str, processing_time: float):
+        self.processing_times[camera_id].append(processing_time)
+        if len(self.processing_times[camera_id]) > 100:
+            self.processing_times[camera_id] = self.processing_times[camera_id][-100:]
+
+        if self.processing_times[camera_id]:
+            avg_time = sum(self.processing_times[camera_id]) / len(self.processing_times[camera_id])
+            self.processing_fps[camera_id] = 1.0 / avg_time if avg_time > 0 else 0
+
     def _update_tunnel_map(self, map_updates: List):
         for update_tuple in map_updates:
             try:
@@ -1341,6 +1555,16 @@ class EnhancedVehicleSystem:
                     self.output_manager.write_camera_video(cam_id, result.processed_frame)
 
             map_frame = self.tunnel_map.render(time_point)
+
+            if self.fire_detector:
+                map_frame = self.fire_detector.draw_detections_on_map(map_frame)
+
+            if self.llm_assistant:
+                try:
+                    llm_map = self._render_map_for_llm(time_point)
+                    self.llm_assistant.update_combined_view(llm_map)
+                except Exception:
+                    pass
 
             combined_view = self.view_composer.create_combined_view(
                 camera_frames, map_frame, time_point
